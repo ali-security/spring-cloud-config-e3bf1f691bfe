@@ -1,0 +1,97 @@
+# Seal build for spring-cloud-config 2.2.6.RELEASE.
+# Upstream 2.2.x has no GitHub Actions CI; this mirrors its .circleci/config.yml
+# ("./mvnw -s .settings.xml clean install", JDK 8) over the whole reactor, with
+# the checkstyle and spring-javaformat gates left ON exactly as upstream runs them.
+name: seal-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Optional surefire -Dtest selector; empty runs the full suite"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 48
+    env:
+      _JAVA_OPTIONS: "-Xms1024m -Xmx2048m"
+      TERM: dumb
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+
+      - name: Drop repo.spring.io profile (all 2.2.6 deps resolve from Maven Central)
+        run: ": > .mvn/maven.config"
+
+      - name: Build and test (full suite)
+        if: ${{ inputs.test-filter == '' }}
+        run: >
+          ./mvnw -B -e -V -nsu
+          -Dmaven.test.redirectTestOutputToFile=true
+          -Dmaven.javadoc.skip=true -Dgpg.skip=true
+          clean install
+
+      - name: Build and test (filtered)
+        if: ${{ inputs.test-filter != '' }}
+        run: >
+          ./mvnw -B -e -V -nsu
+          -Dmaven.test.redirectTestOutputToFile=true
+          -Dmaven.javadoc.skip=true -Dgpg.skip=true
+          -Dtest='${{ inputs.test-filter }}' -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false
+          clean install
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: spring-cloud-config-server-jars
+          path: |
+            spring-cloud-config-server/target/spring-cloud-config-server-2.2.6.RELEASE.jar
+            spring-cloud-config-server/target/spring-cloud-config-server-2.2.6.RELEASE-tests.jar
+          if-no-files-found: error
+
+      - name: Test summary and skipped-test reasons
+        if: always()
+        shell: python3 {0}
+        run: |
+          import glob, os, re, xml.etree.ElementTree as ET
+          totals = {}
+          skipped = []
+          for f in sorted(glob.glob("**/target/surefire-reports/TEST-*.xml", recursive=True)):
+              module = f.split("/target/")[0]
+              root = ET.parse(f).getroot()
+              t = totals.setdefault(module, [0, 0, 0, 0])
+              t[0] += int(root.get("tests", 0)); t[1] += int(root.get("failures", 0))
+              t[2] += int(root.get("errors", 0)); t[3] += int(root.get("skipped", 0))
+              for tc in root.iter("testcase"):
+                  sk = tc.find("skipped")
+                  if sk is None:
+                      continue
+                  msg = (sk.get("message") or "").strip()
+                  cls, name = tc.get("classname", ""), tc.get("name", "")
+                  if not msg:
+                      src = os.path.join(module, "src/test/java", cls.replace(".", "/") + ".java")
+                      if os.path.exists(src):
+                          lines = open(src, encoding="utf-8").read().splitlines()
+                          for i, l in enumerate(lines):
+                              if re.search(r"\b%s\s*\(" % re.escape(name), l) and "void" in l:
+                                  for j in range(max(0, i - 4), i):
+                                      if "@Ignore" in lines[j] or "@Disabled" in lines[j]:
+                                          msg = "source: " + lines[j].strip()
+                                  break
+                  skipped.append((cls, name, msg or "no reason recorded"))
+          print("==== Test summary per module ====")
+          g = [0, 0, 0, 0]
+          for m, t in sorted(totals.items()):
+              print(f"{m}: run={t[0]} failures={t[1]} errors={t[2]} skipped={t[3]} passed={t[0]-t[1]-t[2]-t[3]}")
+              g = [a + b for a, b in zip(g, t)]
+          print(f"TOTAL: run={g[0]} failures={g[1]} errors={g[2]} skipped={g[3]} passed={g[0]-g[1]-g[2]-g[3]}")
+          print("==== Skipped tests ====")
+          for cls, name, msg in skipped:
+              print(f"SKIPPED {cls}.{name}: {msg}")
