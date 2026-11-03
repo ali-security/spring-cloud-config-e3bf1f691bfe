@@ -33,6 +33,7 @@ import org.springframework.cloud.config.server.test.ConfigServerTestUtils;
 import org.springframework.core.env.StandardEnvironment;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * @author Dave Syer
@@ -119,6 +120,41 @@ public class MultipleJGitEnvironmentApplicationPlaceholderRepositoryTests {
 				.isEqualTo(getUri("*").replace("{application}", "test2-config-repo")
 						+ "/application.properties");
 		assertVersion(environment);
+	}
+
+	@Test
+	public void invalidAuthorityTests() {
+		assertThatThrownBy(() -> createRepository("test", "*-config-repo",
+				"http://{profile}:8080/test1-config-repo"))
+						.isInstanceOf(IllegalArgumentException.class);
+		assertThatThrownBy(() -> createRepository("test", "*-config-repo",
+				"http://localhost:{profile}/test1-config-repo"))
+						.isInstanceOf(IllegalStateException.class);
+	}
+
+	@Test
+	public void templatedAuthorityIsRejectedWhenResolvingRepository() {
+		Map<String, PatternMatchingJGitEnvironmentRepository> repos = new HashMap<>();
+		repos.put("host", createRepositoryFromProperties("host",
+				"http://{profile}:8080/test1-config-repo"));
+		repos.put("port", createRepositoryFromProperties("port",
+				"http://localhost:{profile}/test1-config-repo"));
+		this.repository.setRepos(repos);
+		assertThatThrownBy(
+				() -> this.repository.findOne("host", "attacker.invalid", "master"))
+						.hasRootCauseInstanceOf(IllegalArgumentException.class);
+		assertThatThrownBy(() -> this.repository.findOne("port", "1234", "master"))
+				.hasRootCauseInstanceOf(IllegalStateException.class);
+	}
+
+	private PatternMatchingJGitEnvironmentRepository createRepositoryFromProperties(
+			String name, String uri) {
+		MultipleJGitEnvironmentProperties.PatternMatchingJGitEnvironmentProperties properties = new MultipleJGitEnvironmentProperties.PatternMatchingJGitEnvironmentProperties(
+				uri);
+		properties.setName(name);
+		properties.setPattern(new String[] { name });
+		return new PatternMatchingJGitEnvironmentRepository(this.environment,
+				properties);
 	}
 
 	@Test
